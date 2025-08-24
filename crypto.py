@@ -24,7 +24,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=False,  # Set to True in production with HTTPS
+    SESSION_COOKIE_SECURE=True,  # Set to True in production with HTTPS
     SESSION_COOKIE_SAMESITE="Strict",
     PERMANENT_SESSION_LIFETIME=3600,  # 1 hour
     MAX_CONTENT_LENGTH=16 * 1024 * 1024  # 16MB max file size
