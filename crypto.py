@@ -24,7 +24,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=True,  # Set to True in production with HTTPS
+    SESSION_COOKIE_SECURE=False,  # Set to True in production with HTTPS
     SESSION_COOKIE_SAMESITE="Strict",
     PERMANENT_SESSION_LIFETIME=3600,  # 1 hour
     MAX_CONTENT_LENGTH=16 * 1024 * 1024  # 16MB max file size
@@ -669,18 +669,19 @@ def generate():
     # Hash password
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
 
-    with store_lock:
-        store[key] = {
-            "ciphertext": encrypted,
-            "password_hash": password_hash.decode(),
-            "created_at": time.time(),
-            "accessed": False,
-            "viewed_at": None,
-            "revoked": False,
-            "fail_count": 0,
-            "locked_until": 0,
-            "sender_hostname": request.host
-        }
+    sender_userinfo = session.get('user', {})
+    store[key] = {
+        "ciphertext": encrypted,
+        "password_hash": password_hash.decode(),
+        "created_at": time.time(),
+        "accessed": False,
+        "viewed_at": None,
+        "revoked": False,
+        "fail_count": 0,
+        "locked_until": 0,
+        "sender_hostname": request.host,
+        "sender_okta_user": sender_userinfo  # store sender info here
+    }
 
     raw_link = request.url_root.rstrip("/") + "/view/" + key
     response = make_response(render_template_string(
@@ -785,23 +786,14 @@ def logout():
     return redirect(url_for('index'))
 
 
-@app.route("/view/<key>", methods=["GET", "POST"])
-@rate_limit(max_requests=20, window=60)   # homepage form, moderate limit
 
+
+@app.route("/view/<key>", methods=["GET", "POST"])
+@rate_limit(max_requests=20, window=60)
 def view(key):
-    if not (session.get('authenticated') and session.get('user')):
-        return "Unauthorized", 403
     # Validate key format
     if not re.match(r'^[A-Za-z0-9_-]+$', key):
         return "Invalid key format", 400
-
-    # Check if user is authenticated via SSO
-    user_authenticated = session.get('authenticated', False)
-    userinfo = session.get('user')
-
-    # print(f"🔍 View request for key: {key}")
-    # print(f"   User authenticated: {user_authenticated}")
-    # print(f"   User info: {userinfo}")
 
     entry = store.get(key)
 
@@ -816,105 +808,102 @@ def view(key):
         response = make_response(render_template_string(view_template, message=None))
         return add_security_headers(response)
 
-    # If user logged in via Okta SSO, bypass password prompt
+    # Removed SSO check here to allow anyone to view with password
 
-    # Require SSO login + password
-    if not (user_authenticated and userinfo):
-        return "Unauthorized", 403
-
-    # Dark-themed password prompt
+    # GET: show password prompt
     if request.method == "GET":
-        password_template = """
-        <!doctype html>
-        <html>
-        <head>
-          <meta charset="UTF-8">
-          <title>🔐 Enter Password</title>
-          <footer style="position:fixed; bottom:20px; width:100%; text-align:center; font-size:1rem; color:#bcd3e1a4;">
-    © Hy-Vee Security
-  </footer>
-          <style>
-            * {
-              box-sizing: border-box;
-            }
-            body {
-              margin: 0;
-              padding: 0;
-              background: #1f2f38;
-              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-              display: flex;
-              justify-content: center;
-              align-items: center;
-              height: 100vh;
-              color: #d1d9e6;
-            }
-            .container {
-              background: #2b3e47;
-              padding: 40px;
-              border-radius: 20px;
-              box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
-              max-width: 600px;
-              width: 100%;
-            }
-            h2 {
-              font-size: 24px;
-              margin-bottom: 10px;
-              display: flex;
-              align-items: center;
-              font-weight: bold;
-            }
-            h2 .emoji {
-              font-size: 28px;
-              margin-right: 10px;
-            }
-            p {
-              font-size: 17px;
-              color: #a0b0c2;
-              margin-bottom: 30px;
-            }
-            input[type="password"] {
-              width: 100%;
-              padding: 14px;
-              border-radius: 12px;
-              border: none;
-              background: #0e1621;
-              color: white;
-              font-size: 16px;
-              margin-bottom: 25px;
-            }
-            input::placeholder {
-              color: #ccc;
-            }
-            button {
-              background: #00e0c6;
-              color: white;
-              font-weight: bold;
-              padding: 14px 28px;
-              border: none;
-              border-radius: 12px;
-              font-size: 16px;
-              cursor: pointer;
-              transition: background 0.3s ease;
-            }
-            button:hover {
-              background: #03c6b0;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <h2><span class="emoji">🔐</span>Enter Password</h2>
-            <p>To reveal the secret, enter the password the sender provided.</p>
-            <form method="post">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-              <input type="password" name="password" placeholder="Password" required maxlength="{{ max_password_length }}" />
-              <br/>
-              <button type="submit">🔓 View Secret</button>
-            </form>
-          </div>
-        </body>
-        </html>
-        """
+        if request.method == "GET":
+            password_template = """
+              <!doctype html>
+              <html>
+              <head>
+                <meta charset="UTF-8">
+                <title>🔐 Enter Password</title>
+                <footer style="position:fixed; bottom:20px; width:100%; text-align:center; font-size:1rem; color:#bcd3e1a4;">
+          © Hy-Vee Security
+        </footer>
+                <style>
+                  * {
+                    box-sizing: border-box;
+                  }
+                  body {
+                    margin: 0;
+                    padding: 0;
+                    background: #1f2f38;
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    height: 100vh;
+                    color: #d1d9e6;
+                  }
+                  .container {
+                    background: #2b3e47;
+                    padding: 40px;
+                    border-radius: 20px;
+                    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+                    max-width: 600px;
+                    width: 100%;
+                  }
+                  h2 {
+                    font-size: 24px;
+                    margin-bottom: 10px;
+                    display: flex;
+                    align-items: center;
+                    font-weight: bold;
+                  }
+                  h2 .emoji {
+                    font-size: 28px;
+                    margin-right: 10px;
+                  }
+                  p {
+                    font-size: 17px;
+                    color: #a0b0c2;
+                    margin-bottom: 30px;
+                  }
+                  input[type="password"] {
+                    width: 100%;
+                    padding: 14px;
+                    border-radius: 12px;
+                    border: none;
+                    background: #0e1621;
+                    color: white;
+                    font-size: 16px;
+                    margin-bottom: 25px;
+                  }
+                  input::placeholder {
+                    color: #ccc;
+                  }
+                  button {
+                    background: #00e0c6;
+                    color: white;
+                    font-weight: bold;
+                    padding: 14px 28px;
+                    border: none;
+                    border-radius: 12px;
+                    font-size: 16px;
+                    cursor: pointer;
+                    transition: background 0.3s ease;
+                  }
+                  button:hover {
+                    background: #03c6b0;
+                  }
+                </style>
+              </head>
+              <body>
+                <div class="container">
+                  <h2><span class="emoji">🔐</span>Enter Password</h2>
+                  <p>To reveal the secret, enter the password the sender provided.</p>
+                  <form method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                    <input type="password" name="password" placeholder="Password" required maxlength="{{ max_password_length }}" />
+                    <br/>
+                    <button type="submit">🔓 View Secret</button>
+                  </form>
+                </div>
+              </body>
+              </html>
+              """
         response = make_response(render_template_string(
             password_template,
             csrf_token=generate_csrf_token(),
@@ -922,25 +911,22 @@ def view(key):
         ))
         return add_security_headers(response)
 
-    # POST: verify password
-    # Validate CSRF token
+        # POST: verify password
     csrf_token = request.form.get("csrf_token")
     if not validate_csrf_token(csrf_token):
         return "Invalid CSRF token", 403
 
     password = request.form.get("password", "")
 
-    # Validate password input
     is_valid, result = validate_input(password, MAX_PASSWORD_LENGTH)
     if not is_valid:
         return f"Invalid password: {result}", 400
     password = result
 
-    stored_hash = entry["password_hash"].encode()  # stored bcrypt hash is str, encode to bytes
+    stored_hash = entry["password_hash"].encode()
     if not bcrypt.checkpw(password.encode(), stored_hash):
         return "<h3 style='text-align:center;color:#ff4f4f;background:#081224;padding:2rem;border-radius:12px;font-family:Inter,sans-serif;'>❌ Incorrect password.</h3>", 403
 
-    # Already accessed once
     if entry.get("accessed"):
         return render_template_string(view_template, message=None)
 
@@ -949,30 +935,22 @@ def view(key):
     except InvalidToken:
         return render_template_string(view_template, message=None)
 
-    # Mark as accessed and update timestamp
-    # Mark as accessed and update timestamp
     entry["accessed"] = True
     entry["viewed_at"] = time.time()
 
-    # Get sender hostname if stored, otherwise fallback gracefully
-    sender_hostname = entry.get("sender_hostname")
-    if not sender_hostname:
-        sender_hostname = request.host  # safer fallback instead of undefined get_remote_hostname()
-
-    # Okta user info (fallback to Unknown if missing)
-    okta_name = "Unknown"
-    if userinfo and isinstance(userinfo, dict):
-        okta_name = (
-                userinfo.get("name")
-                or userinfo.get("preferred_username")
-                or userinfo.get("email")
-                or "Unknown"
-        )
+    # Attempt to get Okta user info if available; optional now
+    userinfo = session.get('user')
+    sender_okta_user = entry.get("sender_okta_user", {})
+    okta_name = (
+            sender_okta_user.get("name")
+            or sender_okta_user.get("preferred_username")
+            or sender_okta_user.get("email")
+            or "Unknown"
+    )
 
     response = make_response(render_template_string(
         view_template,
-        message=escape(message),  # Escape message to prevent XSS
-        sender_hostname=escape(sender_hostname),
+        message=escape(message),
         ttl_after_view=TTL_AFTER_VIEW,
         okta_name=escape(okta_name)
     ))
@@ -998,18 +976,20 @@ def get_remote_ip():
 @app.route("/status/<key>")
 @rate_limit(max_requests=10, window=60)
 def status(key):
-    # Validate key format
     if not re.match(r'^[A-Za-z0-9_-]+$', key):
         return jsonify({"error": "Invalid key format"}), 400
 
     with store_lock:
         entry = store.get(key)
         if not entry:
-            response = make_response(jsonify({"expired": True}))
-            return add_security_headers(response)
+            return add_security_headers(make_response(jsonify({"expired": True})))
+
         is_expired = entry.get("revoked") or (time.time() - entry["created_at"] > TTL_LINK_SECONDS)
-        response = make_response(jsonify({"accessed": bool(entry.get("accessed")), "expired": bool(is_expired)}))
-        return add_security_headers(response)
+        return add_security_headers(make_response(jsonify({
+            "accessed": bool(entry.get("accessed")),
+            "expired": bool(is_expired)
+        })))
+
 
 
 @app.route("/api/revoke/<key>", methods=["POST"])
